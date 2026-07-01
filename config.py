@@ -43,7 +43,7 @@ MONITOR = "val_combined"
 MODE = "max"
 
 # ============================================================================
-# STAGE 2: SECONDARY TRAINING (UGA FINE-TUNING) CONSTANTS
+# STAGE 2: SECONDARY TRAINING (UPA FINE-TUNING) CONSTANTS
 # ============================================================================
 STAGE2_EPOCHS = 15
 STAGE2_INITIAL_LR = 3.0e-4
