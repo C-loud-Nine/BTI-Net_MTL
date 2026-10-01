@@ -174,8 +174,19 @@ class TaskInteractionModule(layers.Layer):
         return config
 
 
-class UncertaintyProxyAttention(layers.Layer):
-    """Uncertainty Proxy Attention (UPA): per-instance, per-level gating between base and TIM-enhanced features using 3 signals (alignment, seg energy, clf energy)."""
+class SupervisedReliabilityGate(layers.Layer):
+    """Supervised Reliability Gate (SRG).
+
+    Produces one scalar coefficient per task, per decoder level and per image,
+    interpolating between the pre-interaction features and the TIM-enhanced
+    features. Driven by three signals: cross-task alignment, segmentation
+    spatial complexity, and classification activation spread. These are
+    activation statistics, not estimates of predictive uncertainty.
+
+    The coefficients are exposed as `_last_w_seg` and `_last_w_clf` so the
+    auxiliary gate objective in loss.py can read them, and so they can be
+    scored as failure signals in evaluate.py.
+    """
     def __init__(self, seg_channels, clf_channels, **kwargs):
         super().__init__(**kwargs)
         self.seg_channels = seg_channels

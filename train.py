@@ -334,10 +334,10 @@ def main():
     
     
     # ========================================================================
-    # STAGE 2: SECONDARY TRAINING PHASE (UPA FINE-TUNING)
+    # STAGE 2: SECONDARY TRAINING PHASE (SRG FINE-TUNING)
     # ========================================================================
     print("\n" + "=" * 80)
-    print("STAGE 2: SECONDARY TRAINING PHASE (UPA FINE-TUNING)")
+    print("STAGE 2: SECONDARY TRAINING PHASE (SRG FINE-TUNING)")
     print("=" * 80)
     
     model_ft = model
@@ -346,19 +346,19 @@ def main():
     for layer in model_ft.layers:
         layer.trainable = False
 
-    # Unfreeze UPA layers using config constants
-    upa_layers = []
+    # Unfreeze SRG layers using config constants
+    srg_layers = []
     
-    for name in config.UPA_LAYER_NAMES:
+    for name in config.SRG_LAYER_NAMES:
         try:
-            upa = model_ft.get_layer(name)
-            upa.trainable = True
-            upa_layers.append(upa)
+            srg = model_ft.get_layer(name)
+            srg.trainable = True
+            srg_layers.append(srg)
         except ValueError:
-            print(f"  Warning: Layer '{name}' not found. Skipping UPA unfreezing.")
+            print(f"  Warning: Layer '{name}' not found. Skipping SRG unfreezing.")
 
-    if not upa_layers:
-        print("  Error: No UPA layers found! Skipping Stage 2.")
+    if not srg_layers:
+        print("  Error: No SRG layers found! Skipping Stage 2.")
     else:
         # Verify trainable parameters before compiling
         trainable_count = sum(
@@ -372,8 +372,8 @@ def main():
                 global_clipnorm=config.GLOBAL_CLIPNORM,
             ),
             loss={
-                'segmentation_output':   make_seg_loss(upa_layers, lambda_gate=config.STAGE2_LAMBDA_GATE),
-                'classification_output': make_clf_loss(upa_layers, lambda_gate=config.STAGE2_LAMBDA_GATE),
+                'segmentation_output':   make_seg_loss(srg_layers, lambda_gate=config.STAGE2_LAMBDA_GATE),
+                'classification_output': make_clf_loss(srg_layers, lambda_gate=config.STAGE2_LAMBDA_GATE),
             },
             metrics={
                 'segmentation_output': [
@@ -414,8 +414,8 @@ def main():
     print("TEST EVALUATION")
     print("=" * 80)
     
-    # Evaluate the fine-tuned model (falls back to base model if UPA skipped)
-    eval_model = model_ft if upa_layers else model
+    # Evaluate the fine-tuned model (falls back to base model if SRG skipped)
+    eval_model = model_ft if srg_layers else model
     
     test_results = eval_model.evaluate(test_dataset, verbose=1)
     print(f"\nTest Results ({dataset_cfg['name']}):")

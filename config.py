@@ -43,17 +43,17 @@ MONITOR = "val_combined"
 MODE = "max"
 
 # ============================================================================
-# STAGE 2: SECONDARY TRAINING (UPA FINE-TUNING) CONSTANTS
+# STAGE 2: SECONDARY TRAINING (SRG FINE-TUNING) CONSTANTS
 # ============================================================================
 STAGE2_EPOCHS = 15
 STAGE2_INITIAL_LR = 3.0e-4
 STAGE2_LAMBDA_GATE = 1.0
 STAGE2_EARLY_STOPPING_PATIENCE = 5
-UPA_LAYER_NAMES = [
-    'upa_d1', 
-    'upa_d2',
-    'upa_d3', 
-    'upa_d4'
+SRG_LAYER_NAMES = [
+    'srg_d1', 
+    'srg_d2',
+    'srg_d3', 
+    'srg_d4'
 ]
 
 # Augmentation

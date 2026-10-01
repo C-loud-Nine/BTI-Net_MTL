@@ -186,10 +186,10 @@ def soft_iou_per_sample(y_true, y_pred):
 
 
 # ============================================================================
-# UPA GATE LOSSES
+# SRG GATE LOSSES
 # ============================================================================
 
-def make_seg_loss(upa_layers, lambda_gate=0.01):
+def make_seg_loss(srg_layers, lambda_gate=0.01):
     def loss(y_true, y_pred):
         task     = enhanced_lesion_focus_loss(y_true, y_pred)
         soft_iou = soft_iou_per_sample(y_true, tf.stop_gradient(y_pred))
@@ -202,9 +202,9 @@ def make_seg_loss(upa_layers, lambda_gate=0.01):
         target   = tf.clip_by_value(target, 1e-6, 1.0 - 1e-6)
 
         gate = 0.0; n = 0
-        for upa in upa_layers:
-            if upa._last_w_seg is not None:
-                w = tf.clip_by_value(upa._last_w_seg, 1e-6, 1.0 - 1e-6)
+        for srg in srg_layers:
+            if srg._last_w_seg is not None:
+                w = tf.clip_by_value(srg._last_w_seg, 1e-6, 1.0 - 1e-6)
                 gate += tf.reduce_mean(
                     tf.keras.losses.binary_crossentropy(
                         target[:, tf.newaxis], w[:, tf.newaxis]))
@@ -214,7 +214,7 @@ def make_seg_loss(upa_layers, lambda_gate=0.01):
     return loss
 
 
-def make_clf_loss(upa_layers, lambda_gate=0.01):
+def make_clf_loss(srg_layers, lambda_gate=0.01):
     def loss(y_true, y_pred):
         task       = enhanced_multi_modal_focal_loss(y_true, y_pred)
         confidence = tf.reduce_max(tf.stop_gradient(y_pred), axis=-1)
@@ -227,9 +227,9 @@ def make_clf_loss(upa_layers, lambda_gate=0.01):
         target    = tf.clip_by_value(target, 1e-6, 1.0 - 1e-6)
 
         gate = 0.0; n = 0
-        for upa in upa_layers:
-            if upa._last_w_clf is not None:
-                w = tf.clip_by_value(upa._last_w_clf, 1e-6, 1.0 - 1e-6)
+        for srg in srg_layers:
+            if srg._last_w_clf is not None:
+                w = tf.clip_by_value(srg._last_w_clf, 1e-6, 1.0 - 1e-6)
                 gate += tf.reduce_mean(
                     tf.keras.losses.binary_crossentropy(
                         target[:, tf.newaxis], w[:, tf.newaxis]))

@@ -10,7 +10,7 @@ from modules import (
     ResidualBlock,
     AttentionGate,
     TaskInteractionModule,
-    UncertaintyProxyAttention,
+    SupervisedReliabilityGate,
 )
 
 
@@ -24,8 +24,8 @@ def build_decoder_block(prev, skip, channels, dropout_rate, block_name):
     return x
 
 
-def build_tim_upa(decoder_out, encoder_feat, seg_channels, level_name):
-    """Attach TIM + UPA to a decoder level. Returns (seg_final, clf_final)."""
+def build_tim_srg(decoder_out, encoder_feat, seg_channels, level_name):
+    """Attach TIM + SRG to a decoder level. Returns (seg_final, clf_final)."""
     clf_raw = layers.GlobalAveragePooling2D()(encoder_feat)
     clf_raw = layers.Dense(256, activation='relu', name=f'clf_{level_name}_features')(clf_raw)
 
@@ -33,9 +33,9 @@ def build_tim_upa(decoder_out, encoder_feat, seg_channels, level_name):
                                  name=f'task_interaction_{level_name}')
     seg_enh, clf_enh = tim(decoder_out, clf_raw)
 
-    upa = UncertaintyProxyAttention(seg_channels=seg_channels, clf_channels=256,
-                                     name=f'upa_{level_name}')
-    seg_final, clf_final = upa(decoder_out, seg_enh, clf_raw, clf_enh)
+    srg = SupervisedReliabilityGate(seg_channels=seg_channels, clf_channels=256,
+                                     name=f'srg_{level_name}')
+    seg_final, clf_final = srg(decoder_out, seg_enh, clf_raw, clf_enh)
 
     return seg_final, clf_final
 
@@ -47,7 +47,7 @@ def enhanced_bti_model(
     dropout_rate=0.3,
     l2_lambda=1e-5,
 ):
-    """BTI-Net: TIM + UPA applied at all four decoder levels (D1-D4)."""
+    """BTI-Net: TIM + SRG applied at all four decoder levels (D1-D4)."""
 
     # ------------------------------------------------------------------
     # ENCODER (EfficientNetB4, ImageNet weights)
@@ -71,25 +71,25 @@ def enhanced_bti_model(
     br_e = ResidualBlock(1792, use_attention=True, name='bti_res_bridge')(bridge)
 
     # ------------------------------------------------------------------
-    # DECODER (4 levels, each followed by TIM + UPA)
+    # DECODER (4 levels, each followed by TIM + SRG)
     # ------------------------------------------------------------------
     decoder_channels = [384, 192, 96, 48]
 
     # D1 -- 7x7 -> 14x14
     d1 = build_decoder_block(br_e, s4_e, decoder_channels[0], dropout_rate, 'd1')
-    d1_final, clf_d1 = build_tim_upa(d1, br_e, decoder_channels[0], 'd1')
+    d1_final, clf_d1 = build_tim_srg(d1, br_e, decoder_channels[0], 'd1')
 
     # D2 -- 14x14 -> 28x28
     d2 = build_decoder_block(d1_final, s3_e, decoder_channels[1], dropout_rate, 'd2')
-    d2_final, clf_d2 = build_tim_upa(d2, s4_e, decoder_channels[1], 'd2')
+    d2_final, clf_d2 = build_tim_srg(d2, s4_e, decoder_channels[1], 'd2')
 
     # D3 -- 28x28 -> 56x56
     d3 = build_decoder_block(d2_final, s2_e, decoder_channels[2], dropout_rate, 'd3')
-    d3_final, clf_d3 = build_tim_upa(d3, s3_e, decoder_channels[2], 'd3')
+    d3_final, clf_d3 = build_tim_srg(d3, s3_e, decoder_channels[2], 'd3')
 
     # D4 -- 56x56 -> 112x112
     d4 = build_decoder_block(d3_final, s1_e, decoder_channels[3], dropout_rate, 'd4')
-    d4_final, clf_d4 = build_tim_upa(d4, s2_e, decoder_channels[3], 'd4')
+    d4_final, clf_d4 = build_tim_srg(d4, s2_e, decoder_channels[3], 'd4')
 
     # ------------------------------------------------------------------
     # SEGMENTATION HEAD (112x112 -> 224x224)
