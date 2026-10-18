@@ -177,15 +177,23 @@ class TaskInteractionModule(layers.Layer):
 class SupervisedReliabilityGate(layers.Layer):
     """Supervised Reliability Gate (SRG).
 
-    Produces one scalar coefficient per task, per decoder level and per image,
-    interpolating between the pre-interaction features and the TIM-enhanced
-    features. Driven by three signals: cross-task alignment, segmentation
-    spatial complexity, and classification activation spread. These are
-    activation statistics, not estimates of predictive uncertainty.
+    Per-instance, per-level gating between pre-interaction and TIM-enhanced
+    features. Two INDEPENDENT sigmoid coefficients are produced per level and
+    per sample (they do not sum to 1) from three signals:
 
-    The coefficients are exposed as `_last_w_seg` and `_last_w_clf` so the
-    auxiliary gate objective in loss.py can read them, and so they can be
-    scored as failure signals in evaluate.py.
+      1. cross-task alignment between the two residual directions,
+      2. segmentation spatial-gradient magnitude,
+      3. log(1 + variance) of the enhanced classification vector.
+
+    None of the three is a predictive-uncertainty estimate: all are computed
+    from a single deterministic forward pass. In Stage 2 the coefficients are
+    trained against an explicit supervision target derived from per-sample
+    segmentation IoU and classification confidence, hence "supervised".
+
+    `_last_w_seg` / `_last_w_clf` below cache only the MOST RECENT call. They
+    are a debugging aid, not a dataset-length accumulator: reading them after
+    model.predict() yields the final batch only. Use evaluate.py, which exports
+    the coefficients as real model outputs, for any table or figure.
     """
     def __init__(self, seg_channels, clf_channels, **kwargs):
         super().__init__(**kwargs)
@@ -232,13 +240,26 @@ class SupervisedReliabilityGate(layers.Layer):
             tf.square(clf_enhanced - mean), axis=-1, keepdims=True)
         return tf.math.log1p(variance)   # [B, 1]
 
-    def call(self, seg_base, seg_enhanced, clf_base, clf_enhanced, training=None):
+    def compute_gates(self, seg_base, seg_enhanced, clf_base, clf_enhanced):
+        """Return the raw gate coefficients, shape [B, 2] = (w_seg, w_clf).
+
+        Split out of call() so that evaluate.py can expose the coefficients as
+        real model outputs instead of reading the _last_w_* caches, which hold
+        only the most recent batch. Pure refactor: call() uses this method, so
+        the numerical behaviour is unchanged.
+
+        Note the two coefficients come from independent sigmoids, so they do
+        NOT sum to 1 and each lies in (0, 1) on its own.
+        """
         align      = self._alignment(seg_base, seg_enhanced, clf_base, clf_enhanced)
         seg_energy = self._seg_energy(seg_base)
         clf_energy = self._clf_energy(clf_enhanced)
         gate_input = tf.concat([align, seg_energy, clf_energy], axis=-1)  # [B, 3]
         logits     = self.weight_network(gate_input)
-        weights    = tf.sigmoid(logits)
+        return tf.sigmoid(logits)                                          # [B, 2]
+
+    def call(self, seg_base, seg_enhanced, clf_base, clf_enhanced, training=None):
+        weights = self.compute_gates(seg_base, seg_enhanced, clf_base, clf_enhanced)
         self._last_w_seg = weights[:, 0]
         self._last_w_clf = weights[:, 1]
         w_seg = tf.reshape(weights[:, 0:1], [-1, 1, 1, 1])

@@ -34,7 +34,7 @@ def build_tim_srg(decoder_out, encoder_feat, seg_channels, level_name):
     seg_enh, clf_enh = tim(decoder_out, clf_raw)
 
     srg = SupervisedReliabilityGate(seg_channels=seg_channels, clf_channels=256,
-                                     name=f'srg_{level_name}')
+                                    name=f'srg_{level_name}')
     seg_final, clf_final = srg(decoder_out, seg_enh, clf_raw, clf_enh)
 
     return seg_final, clf_final
@@ -45,7 +45,9 @@ def enhanced_bti_model(
     num_seg_classes=1,
     num_clf_classes=3,
     dropout_rate=0.3,
-    l2_lambda=1e-5,
+    l2_lambda=1e-5,   # ACCEPTED BUT NEVER USED: there is no kernel_regularizer
+                      # anywhere in model.py or modules.py, and the optimiser is
+                      # built without weight_decay. No L2 penalty is applied.
 ):
     """BTI-Net: TIM + SRG applied at all four decoder levels (D1-D4)."""
 

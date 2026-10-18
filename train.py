@@ -334,10 +334,10 @@ def main():
     
     
     # ========================================================================
-    # STAGE 2: SECONDARY TRAINING PHASE (SRG FINE-TUNING)
+    # STAGE 2: SECONDARY TRAINING PHASE (SRG GATE FINE-TUNING)
     # ========================================================================
     print("\n" + "=" * 80)
-    print("STAGE 2: SECONDARY TRAINING PHASE (SRG FINE-TUNING)")
+    print("STAGE 2: SECONDARY TRAINING PHASE (SRG GATE FINE-TUNING)")
     print("=" * 80)
     
     model_ft = model
@@ -346,7 +346,7 @@ def main():
     for layer in model_ft.layers:
         layer.trainable = False
 
-    # Unfreeze SRG layers using config constants
+    # Unfreeze SRG gate layers using config constants
     srg_layers = []
     
     for name in config.SRG_LAYER_NAMES:
@@ -358,7 +358,7 @@ def main():
             print(f"  Warning: Layer '{name}' not found. Skipping SRG unfreezing.")
 
     if not srg_layers:
-        print("  Error: No SRG layers found! Skipping Stage 2.")
+        print("  Error: No SRG gate layers found! Skipping Stage 2.")
     else:
         # Verify trainable parameters before compiling
         trainable_count = sum(

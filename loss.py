@@ -13,6 +13,7 @@ class GeometricFilters:
         y   = tf.cast(tf.range(k) - (k // 2), tf.float32)
         xx, yy = tf.meshgrid(x, y)
         r2  = xx * xx + yy * yy
+        # sigma = k/4, so the 5x5 kernel used here gives sigma = 1.25.
         sigma   = tf.cast(k / 4.0, tf.float32)
         gaussian = tf.exp(-r2 / (2.0 * (sigma * sigma + eps)))
         f   = (xx * xx - yy * yy) * gaussian
@@ -25,7 +26,14 @@ class GeometricFilters:
 # ============================================================================
 
 def stabilized_tversky_index(y_true, y_pred, alpha=0.5, beta=0.5, smooth=1e-7):
-    """Per-image Tversky index. Returns shape [B]."""
+    """Per-image Tversky index. Returns shape [B].
+
+    WARNING: both call sites below invoke this WITHOUT alpha or beta, so these
+    symmetric defaults apply and the term reduces to a focal Dice loss. The
+    asymmetric alpha=0.3 / beta=0.7 penalty is not applied anywhere in this
+    repository. If the asymmetric form is intended, pass it explicitly at the
+    call site and re-run every reported result.
+    """
     y_true = tf.cast(y_true, tf.float32)
     y_pred = tf.cast(y_pred, tf.float32)
     if y_true.shape.rank == 3:
@@ -59,6 +67,10 @@ def efficient_boundary_detection(y_true, y_pred, kernel_size=5):
     if y_pred.shape.rank == 3:
         y_pred = tf.expand_dims(y_pred, -1)
 
+    # NOTE: y_pred is hard-thresholded here, so this term is NOT
+    # differentiable with respect to the mask probabilities. It changes the
+    # logged loss value and can affect checkpoint selection, but supplies no
+    # boundary-training gradient. Treat it as a diagnostic, not a penalty.
     y_true_bin = tf.clip_by_value(tf.cast(y_true > 0.5, tf.float32), 0.0, 1.0)
     y_pred_bin = tf.clip_by_value(tf.cast(y_pred > 0.5, tf.float32), 0.0, 1.0)
 
@@ -74,7 +86,11 @@ def efficient_boundary_detection(y_true, y_pred, kernel_size=5):
 
 
 def efficient_texture_consistency(y_true, y_pred):
-    """Sobel gradient std consistency loss (scalar)."""
+    """Horizontal mask-gradient dispersion penalty (scalar).
+
+    Sobel is applied to the MASKS (y_true, y_pred), not to the input image, so
+    this does not measure image texture. The paper names it accordingly.
+    """
     eps    = 1e-8
     y_true = tf.cast(y_true, tf.float32)
     y_pred = tf.cast(y_pred, tf.float32)
@@ -131,6 +147,9 @@ def enhanced_lesion_focus_loss(y_true, y_pred):
     axes         = [1, 2, 3]
     total_pixels = tf.cast(tf.shape(y_true)[1] * tf.shape(y_true)[2] * tf.shape(y_true)[3], tf.float32)
     lesion_ratio = tf.clip_by_value(tf.reduce_sum(y_true, axis=axes) / tf.maximum(total_pixels, 1.0), 0.0, 1.0)
+    # Factor lies in [1, 2] and attains its MAXIMUM at lesion_ratio = 0, i.e.
+    # on EMPTY masks, not on small lesions. Mask-free cases are therefore
+    # upweighted most unless excluded upstream.
     size_boost   = 1.0 + tf.clip_by_value(tf.exp(-10.0 * lesion_ratio), 0.0, 2.0)
 
     loss = tf.clip_by_value(base * size_boost + 0.25 * b_vec + 0.15 * t_vec, 0.0, 10.0)
@@ -190,6 +209,12 @@ def soft_iou_per_sample(y_true, y_pred):
 # ============================================================================
 
 def make_seg_loss(srg_layers, lambda_gate=0.01):
+    """Stage-2 segmentation loss: task term + SRG gate supervision.
+
+    NOTE: train.py passes lambda_gate=config.STAGE2_LAMBDA_GATE, which is 1.0,
+    so this 0.01 default is never the value used. The effective gate weight is
+    1.0 for BUSI, HAM10000 and BRISC alike.
+    """
     def loss(y_true, y_pred):
         task     = enhanced_lesion_focus_loss(y_true, y_pred)
         soft_iou = soft_iou_per_sample(y_true, tf.stop_gradient(y_pred))
@@ -198,7 +223,11 @@ def make_seg_loss(srg_layers, lambda_gate=0.01):
         iou_min  = tf.reduce_min(soft_iou)
         iou_max  = tf.reduce_max(soft_iou)
         iou_norm = (soft_iou - iou_min) / (iou_max - iou_min + 1e-7)
-        target   = 1.0 - iou_norm   # hard samples → target close to 1.0
+        # Target is a WITHIN-BATCH RANK, not an absolute difficulty: min-max
+        # normalisation forces the hardest sample in every batch to 1.0 and the
+        # easiest to 0.0, whatever their absolute IoU. The gate therefore learns
+        # relative, batch-conditional difficulty.
+        target   = 1.0 - iou_norm   # hardest sample in the batch -> 1.0
         target   = tf.clip_by_value(target, 1e-6, 1.0 - 1e-6)
 
         gate = 0.0; n = 0
@@ -215,6 +244,13 @@ def make_seg_loss(srg_layers, lambda_gate=0.01):
 
 
 def make_clf_loss(srg_layers, lambda_gate=0.01):
+    """Stage-2 classification loss: task term + SRG gate supervision.
+
+    The confidence signal below is the MAXIMUM softmax probability, not the
+    probability of the true class, so a confidently wrong prediction counts as
+    confident. The manuscript has been corrected to state this. Same
+    lambda_gate note as make_seg_loss: train.py overrides the default with 1.0.
+    """
     def loss(y_true, y_pred):
         task       = enhanced_multi_modal_focal_loss(y_true, y_pred)
         confidence = tf.reduce_max(tf.stop_gradient(y_pred), axis=-1)

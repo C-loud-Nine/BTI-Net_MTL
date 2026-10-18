@@ -43,16 +43,18 @@ MONITOR = "val_combined"
 MODE = "max"
 
 # ============================================================================
-# STAGE 2: SECONDARY TRAINING (SRG FINE-TUNING) CONSTANTS
+# STAGE 2: SECONDARY TRAINING (SRG GATE FINE-TUNING) CONSTANTS
 # ============================================================================
 STAGE2_EPOCHS = 15
 STAGE2_INITIAL_LR = 3.0e-4
+# One value for BUSI, HAM10000 and BRISC alike. There is no per-modality gate
+# weight in this repository; the manuscript has been corrected to match.
 STAGE2_LAMBDA_GATE = 1.0
 STAGE2_EARLY_STOPPING_PATIENCE = 5
 SRG_LAYER_NAMES = [
-    'srg_d1', 
+    'srg_d1',
     'srg_d2',
-    'srg_d3', 
+    'srg_d3',
     'srg_d4'
 ]
 

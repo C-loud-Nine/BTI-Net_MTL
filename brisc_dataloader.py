@@ -86,6 +86,17 @@ def load_sample_tf(
             img = cv2.resize(img, image_size).astype(np.float32) / 255.0
 
         # ── Parse Mask (Real vs Synthesized Sentinel) ───────────────────
+        # WARNING: a missing segmentation mask on a TUMOUR-labelled image is
+        # replaced by an all-zero mask, so the overlap loss and every reported
+        # segmentation metric treat it as a confirmed background-only case.
+        # BRISC ships 6,000 classification images against 4,793 mask pairs, so
+        # this branch is reached often and it depresses mean IoU and mean Dice
+        # by an amount that depends on how many such cases land in the test
+        # split. Preferred behaviour is to keep the classification loss for
+        # these cases and EXCLUDE them from the overlap computation, which is a
+        # behaviour change: it alters the reported BRISC segmentation numbers
+        # and requires a re-run. Left as-is so the released code reproduces the
+        # released tables. See CODE_CHANGES.md item G2-5.
         if mp == config.BRISC_ZERO_MASK_SENTINEL:
             msk = np.zeros((*image_size, 1), dtype=np.float32)
         else:
