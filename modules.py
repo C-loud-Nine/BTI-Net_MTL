@@ -195,20 +195,31 @@ class SupervisedReliabilityGate(layers.Layer):
     model.predict() yields the final batch only. Use evaluate.py, which exports
     the coefficients as real model outputs, for any table or figure.
     """
-    def __init__(self, seg_channels, clf_channels, **kwargs):
+    def __init__(self, seg_channels, clf_channels, mode=None, **kwargs):
         super().__init__(**kwargs)
+        import config as _cfg
         self.seg_channels = seg_channels
         self.clf_channels = clf_channels
+        self.mode = mode or getattr(_cfg, "GATE_MODE", "srg")
+        if self.mode not in ("srg", "off", "fixed", "constant"):
+            raise ValueError(f"unknown gate mode: {self.mode}")
         self._last_w_seg  = None
         self._last_w_clf  = None
 
     def build(self, input_shape):
-        self.seg_proj = layers.Dense(64, use_bias=False, name=f'{self.name}_sp')
-        self.clf_proj = layers.Dense(64, use_bias=False, name=f'{self.name}_cp')
-        self.weight_network = tf.keras.Sequential([
-            layers.Dense(32, activation='relu'),
-            layers.Dense(2),
-        ], name=f'{self.name}_wn')
+        # The gate network exists only in "srg" mode; the control modes have
+        # no (off, fixed) or only two (constant) parameters. Unused, unbuilt
+        # sub-layers would make model.trainable_variables raise.
+        if self.mode == "srg":
+            self.seg_proj = layers.Dense(64, use_bias=False, name=f'{self.name}_sp')
+            self.clf_proj = layers.Dense(64, use_bias=False, name=f'{self.name}_cp')
+            self.weight_network = tf.keras.Sequential([
+                layers.Dense(32, activation='relu'),
+                layers.Dense(2),
+            ], name=f'{self.name}_wn')
+        if self.mode == "constant":
+            self.const_logits = self.add_weight(
+                name="const_logits", shape=(2,), initializer="zeros", trainable=True)
         super().build(input_shape)
 
     def _alignment(self, seg_base, seg_enhanced, clf_base, clf_enhanced):
@@ -251,6 +262,13 @@ class SupervisedReliabilityGate(layers.Layer):
         Note the two coefficients come from independent sigmoids, so they do
         NOT sum to 1 and each lies in (0, 1) on its own.
         """
+        batch = tf.shape(seg_base)[0]
+        if self.mode == "off":
+            return tf.ones([batch, 2])
+        if self.mode == "fixed":
+            return 0.5 * tf.ones([batch, 2])
+        if self.mode == "constant":
+            return tf.tile(tf.sigmoid(self.const_logits)[None, :], [batch, 1])
         align      = self._alignment(seg_base, seg_enhanced, clf_base, clf_enhanced)
         seg_energy = self._seg_energy(seg_base)
         clf_energy = self._clf_energy(clf_enhanced)
@@ -273,5 +291,6 @@ class SupervisedReliabilityGate(layers.Layer):
         config.update({
             'seg_channels': self.seg_channels,
             'clf_channels': self.clf_channels,
+            'mode': self.mode,
         })
         return config

@@ -1,13 +1,13 @@
 # BTI-Net: Bidirectional Decoder-Level Task Interaction for Multi-Task Medical Image Analysis
 
 This repository contains the official implementation submitted for peer review.
-Authors and institutional affiliations will be disclosed upon acceptance.
 
 ## Overview
 
 BTI-Net jointly learns segmentation and classification from medical images by
 establishing bidirectional cross-task communication at every decoder level.
-Three modules are proposed:
+SRG is the contribution of this work; TIM and MSCF are retained from the
+preliminary study (arXiv:2603.01295).
 
 - **TIM (Task Interaction Module):** bidirectional decoder-level interaction
   between segmentation and classification through channel-wise gated
@@ -19,15 +19,14 @@ Three modules are proposed:
   to 1. None of the three signals is a predictive-uncertainty estimate: all are
   computed from a single deterministic forward pass, with no ensemble, no
   dropout sampling and no Bayesian overhead. The gate is trained in a second
-  stage against an explicit supervision target derived from per-sample
-  segmentation IoU and classification confidence, which is what "supervised"
-  refers to.
+  stage against targets derived from soft segmentation IoU and maximum
+  classification confidence, which is what "supervised" refers to.
 - **MSCF (Multi-Scale Context Fusion):** parallel dilated separable
   convolutions with instance-adaptive scale weighting.
 
 Evaluated on BUSI (breast ultrasound), HAM10000 (dermoscopy) and BRISC
 (brain MRI). Reported numbers live in the paper and are not duplicated here;
-`evaluate.py` regenerates them from a checkpoint.
+`evaluate.py` computes the per-run metrics behind them from a checkpoint.
 
 ## Repository structure
 
@@ -40,18 +39,24 @@ Evaluated on BUSI (breast ultrasound), HAM10000 (dermoscopy) and BRISC
 |-- busi_dataloader.py    # BUSI loader (numpy arrays)
 |-- ham_dataloader.py     # HAM10000 loader (tf.data)
 |-- brisc_dataloader.py   # BRISC loader (tf.data)
-`-- evaluate.py           # per-image evaluation and gate export
+|-- evaluate.py           # per-image evaluation and gate export
+|-- audit_duplicates.py   # exact / near-duplicate audit against the BUSI manifest
+|-- complexity.py         # parameter and FLOP count
+`-- requirements.txt
 ```
 
 ## Requirements
 
 ```
-tensorflow >= 2.10
+tensorflow == 2.13 (the Stage 1 task-weight behaviour described below is that of TF 2.13)
 numpy
 opencv-python
+albumentations
 scikit-learn
 pandas
 ```
+
+Exact versions: `pip install -r requirements.txt`.
 
 ## Datasets
 
@@ -61,20 +66,33 @@ Download and set the paths in `config.py`:
 - **HAM10000:** https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/DBW86T
 - **BRISC:** https://www.nature.com/articles/s41597-026-06753-y
 
-Splits are stratified by class label with `random_state = 42`;
-BUSI uses `config.TRAIN_SPLIT / VAL_SPLIT / TEST_SPLIT = 0.70 / 0.15 / 0.15`,
-giving 546 / 117 / 117 images.
+All partitions are fixed with `random_state = 42`; only the training seed
+varies between runs. BUSI is stratified by class label with
+`config.TRAIN_SPLIT / VAL_SPLIT / TEST_SPLIT = 0.70 / 0.15 / 0.15`, giving
+545 / 118 / 117 images (`results/split_manifest_busi.csv`; test first, then validation from the remainder). HAM10000 is split
+70 / 15 / 15 by lesion identifier, not by image or class, with disjointness
+asserted (`results/ham_split_manifest.csv`). BRISC uses its official
+5,000 / 1,000 split with a 15% stratified validation carve-out from the
+training pool.
 
-**BRISC mask coverage.** BRISC ships 6,000 classification images against 4,793
-mask pairs. A tumour-labelled image with no mask file is substituted with an
-all-zero mask in `brisc_dataloader.py`, so the overlap loss and every overlap
-metric treat it as a confirmed background-only case. This depresses mean IoU
-and mean Dice by an amount that depends on how many such cases land in the
-test split. `evaluate.py` reports the count of zero-mask test images
-separately so the effect is visible. The preferred behaviour, keeping the
-classification loss for those cases and excluding them from the overlap
-computation, changes the reported BRISC segmentation numbers and therefore
-requires a re-run; the released code is left as it was run.
+**BRISC mask coverage.** BRISC ships 6,000 classification images; its
+segmentation release provides 4,793 masks for the tumour classes, and the 1,207
+non-tumorous images have none. `brisc_dataloader.py` loads an all-zero mask for
+any image without a mask file and logs the count per class, warning for any
+tumour-labelled image that lacks one.
+
+## Controls and audits
+
+| Purpose | How |
+|:--|:--|
+| Gate controls | `config.GATE_MODE`: `srg` (reported), `off` (TIM output used directly), `fixed` (0.5 / 0.5), `constant` (two learned per-level constants); auxiliary objective off with `STAGE2_LAMBDA_GATE = 0`. `off` and `fixed` have no gate parameters, so Stage 2 is skipped for them |
+| Seeds | `python train.py --dataset busi --seed 1`; the split seed stays `config.RANDOM_STATE`; outputs are `checkpoints/final_model_ft_<dataset>_<gate_mode>_lg<lambda>_s<seed>.keras` (`stage1_...` for `off` and `fixed`) and `results/test_results_<dataset>_<gate_mode>_lg<lambda>_s<seed>.txt`, and each run is appended to `results/run_ledger.csv` |
+| Input scale | `config.INPUT_SCALE`: `unit` (reported runs; the Keras EfficientNet-B4 rescales again) or `raw` |
+| Task weights | Stage 1 weights stay at the compile-time 0.82 / 0.18 in TF 2.13; the callback in `train.py` does not reach the compiled loss. Stage 2 uses unit task weights |
+| Duplicate audit (BUSI) | `python audit_duplicates.py --root <BUSI dir> --manifest results/split_manifest_busi.csv` |
+| HAM10000 partition | `results/ham_split_manifest.csv`, lesion-disjoint, with lesion counts in the log |
+| Class-wise metrics | `evaluate.py` reports macro-F1, balanced accuracy and per-class precision, recall and F1 |
+| Cost | `python complexity.py` (parameters, SRG share, FLOPs at 224 x 224) |
 
 ## Training
 
@@ -86,10 +104,11 @@ python train.py --dataset brisc
 
 Training runs in two stages automatically:
 
-- **Stage 1:** the full network is trained on the segmentation and
-  classification losses, up to 50 epochs, with model selection on
-  `config.MONITOR = "val_combined"` (0.7 x mean IoU + 0.3 x accuracy),
-  maximised.
+- **Stage 1:** all layers except the first 50 encoder layers are trained on
+  the segmentation and classification losses, up to 50 epochs; early stopping
+  (patience 22, min_delta 0.004) monitors `config.MONITOR = "val_combined"`
+  (0.7 x IoU + 0.3 x accuracy, IoU per `config.SELECTION_IOU`, maximised) and
+  restores the best weights when it stops.
 - **Stage 2:** every layer is frozen except the four SRG gate networks, which
   are fine-tuned for up to 15 epochs on the difficulty-aware gate loss with
   `STAGE2_LAMBDA_GATE = 1.0`. The same gate weight is used for all three
@@ -109,14 +128,14 @@ Two properties of the gate supervision are worth stating explicitly:
 ## Evaluation
 
 ```bash
-python evaluate.py --checkpoint checkpoints/busi_stage2.keras  --dataset busi
-python evaluate.py --checkpoint checkpoints/ham_stage2.keras   --dataset ham
-python evaluate.py --checkpoint checkpoints/brisc_stage2.keras --dataset brisc
+python evaluate.py --checkpoint checkpoints/final_model_ft_busi_srg_lg1_s42.keras  --dataset busi
+python evaluate.py --checkpoint checkpoints/final_model_ft_ham_srg_lg1_s42.keras   --dataset ham
+python evaluate.py --checkpoint checkpoints/final_model_ft_brisc_srg_lg1_s42.keras --dataset brisc
 ```
 
 `evaluate.py` is additive: it trains nothing and modifies nothing. It writes
-`predictions_<tag>.csv` (one row per test image, including all eight gate
-coefficients), `confusion_<tag>.csv` and `summary_<tag>.json` to
+`predictions_<tag>.csv` (one row per test image with its file name, including
+all eight gate coefficients), `confusion_<tag>.csv` and `summary_<tag>.json` to
 `config.RESULTS_DIR`.
 
 It is built so the published aggregates can be checked rather than trusted:
@@ -143,9 +162,9 @@ All values live in `config.py`. Key ones:
 | Input resolution | 224 x 224 |
 | Encoder | EfficientNetB4 (ImageNet), first 50 layers frozen |
 | Decoder channels | 384 / 192 / 96 / 48 |
-| Batch size (train / val) | 8 / 16 |
-| Initial LR | 3.0e-4, cosine annealing to 1.5e-6 |
-| Optimizer | Adam, eps = 1e-7, global clipnorm 1.0 |
+| Batch size | 8 (training, validation and test pipelines); `evaluate.py --batch-size` (default 16) applies to BUSI only |
+| Initial LR | 3.0e-4, cosine annealing with plateau reduction (factor 0.55, patience 7) to 1.5e-6 |
+| Optimizer | Adam, beta1 = 0.91 in Stage 1 (Adam default 0.9 in Stage 2), eps = 1e-7, global clipnorm 1.0 |
 | Focal Dice gamma | 0.75 |
 | Focal CE gamma | 2.0 |
 | TIM modulation tau | 0.7, giving mu in [1, 1.7] |

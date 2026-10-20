@@ -46,11 +46,11 @@ def load_image_and_merge_masks(
     return merged_mask
 
 
-def load_busi_dataset(dataset_path: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def load_busi_dataset(dataset_path: str):
     """
     Load BUSI dataset with images, masks, and labels using global configuration profiles.
     """
-    images, masks, class_labels = [], [], []
+    images, masks, class_labels, paths = [], [], [], []
     target_size = (config.INPUT_SIZE[0], config.INPUT_SIZE[1])
     
     for category in config.BUSI_CATEGORIES:
@@ -59,7 +59,7 @@ def load_busi_dataset(dataset_path: str) -> Tuple[np.ndarray, np.ndarray, np.nda
             logger.warning(f"Category folder missing: {category_folder}")
             continue
             
-        files = os.listdir(category_folder)
+        files = sorted(os.listdir(category_folder))
         
         for file in files:
             if not file.endswith(".png") or "_mask" in file:
@@ -75,7 +75,7 @@ def load_busi_dataset(dataset_path: str) -> Tuple[np.ndarray, np.ndarray, np.nda
                     continue
                 image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
                 image = cv2.resize(image, target_size)
-                image = image.astype(np.float32) / 255.0
+                image = image.astype(np.float32) / (255.0 if config.INPUT_SCALE == "unit" else 1.0)
                 
                 # Load and merge masks
                 mask = load_image_and_merge_masks(image_path, target_size)
@@ -91,6 +91,7 @@ def load_busi_dataset(dataset_path: str) -> Tuple[np.ndarray, np.ndarray, np.nda
                 masks.append(mask)
                 # FIXED: Use BUSI_CLASS_TO_IDX for consistent label assignment
                 class_labels.append(config.BUSI_CLASS_TO_IDX[category])
+                paths.append(os.path.join(category, file))
                 
             except Exception as e:
                 logger.error(f"Error processing {file}: {e}")
@@ -99,7 +100,8 @@ def load_busi_dataset(dataset_path: str) -> Tuple[np.ndarray, np.ndarray, np.nda
     if len(images) == 0:
         raise ValueError(f"No valid samples found in {dataset_path}")
     
-    return np.array(images, dtype=np.float32), np.array(masks, dtype=np.float32), np.array(class_labels, dtype=np.int32)
+    return (np.array(images, dtype=np.float32), np.array(masks, dtype=np.float32),
+            np.array(class_labels, dtype=np.int32), np.array(paths))
 
 
 def augment_dataset(images: np.ndarray, masks: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
@@ -139,14 +141,14 @@ def prepare_datasets(dataset_path: str = None) -> Dict[str, np.ndarray]:
     logger.info("=" * 60)
     logger.info(f"Loading BUSI dataset from: {dataset_path}")
     
-    images, masks, labels = load_busi_dataset(dataset_path)
+    images, masks, labels, paths = load_busi_dataset(dataset_path)
     
     logger.info(f"Loaded {len(images)} samples")
     logger.info(f"Class distribution: {dict(zip(config.BUSI_CATEGORIES, np.bincount(labels)))}")
     
     # First split: Isolate Test Split out of raw dataset chunk
-    X_train_val, X_test, y_train_val, y_test, mask_train_val, mask_test = train_test_split(
-        images, labels, masks,
+    X_train_val, X_test, y_train_val, y_test, mask_train_val, mask_test, p_train_val, p_test = train_test_split(
+        images, labels, masks, paths,
         test_size=config.TEST_SPLIT,
         stratify=labels,
         random_state=config.RANDOM_STATE
@@ -154,13 +156,21 @@ def prepare_datasets(dataset_path: str = None) -> Dict[str, np.ndarray]:
     
     # Second split: Extract Validation Split out of remainders
     val_relative_ratio = config.VAL_SPLIT / (config.TRAIN_SPLIT + config.VAL_SPLIT)
-    X_train, X_val, y_train, y_val, mask_train, mask_val = train_test_split(
-        X_train_val, y_train_val, mask_train_val,
+    X_train, X_val, y_train, y_val, mask_train, mask_val, p_train, p_val = train_test_split(
+        X_train_val, y_train_val, mask_train_val, p_train_val,
         test_size=val_relative_ratio,
         stratify=y_train_val,
         random_state=config.RANDOM_STATE
     )
     
+    # Partition manifest for traceability and the duplicate audit
+    os.makedirs(config.RESULTS_DIR, exist_ok=True)
+    with open(os.path.join(config.RESULTS_DIR, "split_manifest_busi.csv"), "w") as fh:
+        fh.write("file,class,split\n")
+        for part, ps, ys in (("train", p_train, y_train), ("val", p_val, y_val), ("test", p_test, y_test)):
+            for f, y in zip(ps, ys):
+                fh.write(f"{f},{config.BUSI_CATEGORIES[int(y)]},{part}\n")
+
     # Augment training data
     logger.info("Augmenting training data...")
     X_train, mask_train = augment_dataset(X_train, mask_train)
@@ -186,4 +196,5 @@ def prepare_datasets(dataset_path: str = None) -> Dict[str, np.ndarray]:
         'X_train': X_train, 'y_train': y_train, 'mask_train': mask_train,
         'X_val': X_val, 'y_val': y_val, 'mask_val': mask_val,
         'X_test': X_test, 'y_test': y_test, 'mask_test': mask_test,
+        'paths_test': [os.path.basename(p) for p in p_test],
     }

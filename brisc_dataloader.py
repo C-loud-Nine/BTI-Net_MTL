@@ -58,6 +58,10 @@ def build_path_label_lists(
         f"Loaded {len(img_paths)} samples from {clf_dir} "
         f"| Zero-masks: {mask_paths.count(config.BRISC_ZERO_MASK_SENTINEL)}"
     )
+    for class_name, class_idx in config.BRISC_CLASS_TO_IDX.items():
+        n_zero = sum(1 for m, l in zip(mask_paths, labels)
+                     if l == class_idx and m == config.BRISC_ZERO_MASK_SENTINEL)
+        logger.info(f"  zero-mask images in {class_name}: {n_zero}")
     return img_paths, mask_paths, labels
 
 
@@ -83,20 +87,14 @@ def load_sample_tf(
             img = np.zeros((*image_size, 3), dtype=np.float32)
         else:
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            img = cv2.resize(img, image_size).astype(np.float32) / 255.0
+            img = cv2.resize(img, image_size).astype(np.float32) / (255.0 if config.INPUT_SCALE == "unit" else 1.0)
 
         # ── Parse Mask (Real vs Synthesized Sentinel) ───────────────────
-        # WARNING: a missing segmentation mask on a TUMOUR-labelled image is
-        # replaced by an all-zero mask, so the overlap loss and every reported
-        # segmentation metric treat it as a confirmed background-only case.
-        # BRISC ships 6,000 classification images against 4,793 mask pairs, so
-        # this branch is reached often and it depresses mean IoU and mean Dice
-        # by an amount that depends on how many such cases land in the test
-        # split. Preferred behaviour is to keep the classification loss for
-        # these cases and EXCLUDE them from the overlap computation, which is a
-        # behaviour change: it alters the reported BRISC segmentation numbers
-        # and requires a re-run. Left as-is so the released code reproduces the
-        # released tables. See CODE_CHANGES.md item G2-5.
+        # The BRISC segmentation release covers the three tumour classes only
+        # (4,793 image-mask pairs); the 1,207 non-tumorous images have no mask
+        # file and receive an all-zero mask here. A missing mask on a
+        # tumour-labelled image is logged by build_path_label_lists, and the
+        # per-class zero-mask counts are logged at load time.
         if mp == config.BRISC_ZERO_MASK_SENTINEL:
             msk = np.zeros((*image_size, 1), dtype=np.float32)
         else:
@@ -229,5 +227,6 @@ def prepare_brics_datasets(
     return {
         'train_dataset': train_dataset,
         'val_dataset': val_dataset,
-        'test_dataset': test_dataset
+        'test_dataset': test_dataset,
+        'test_paths': [os.path.basename(p) for p in X_test_img],
     }

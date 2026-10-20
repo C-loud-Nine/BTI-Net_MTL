@@ -40,6 +40,28 @@ REDUCE_LR_PATIENCE = 7
 REDUCE_LR_FACTOR = 0.55
 REDUCE_LR_COOLDOWN = 2
 MONITOR = "val_combined"
+
+# Segmentation IoU used for checkpoint selection and in Stage 2 metrics.
+#   "meaniou_raw": tf.keras.metrics.MeanIoU(num_classes=2) on the sigmoid
+#                  output, as in the reported runs. MeanIoU casts predictions
+#                  to integer class labels, so probabilities below 1 count as
+#                  background.
+#   "binary_iou":  BinaryIoU on both classes after thresholding at 0.5.
+SELECTION_IOU = "meaniou_raw"
+
+# Gate variant (controls requested in the JBHI review, item J-R9):
+#   "srg":      supervised reliability gate (reported model)
+#   "off":      no gate, the TIM output is used directly (w = 1)
+#   "fixed":    fixed blend w_seg = w_clf = 0.5
+#   "constant": two learned per-level constants, no input dependence
+# The auxiliary objective is switched off separately with STAGE2_LAMBDA_GATE = 0.
+GATE_MODE = "srg"
+
+# Input scaling before the Keras EfficientNet-B4, which contains its own
+# Rescaling(1/255) and Normalization layers.
+#   "unit": images divided by 255 in the loaders, as in the reported runs
+#   "raw":  images passed in [0, 255], the range the Keras encoder expects
+INPUT_SCALE = "unit"
 MODE = "max"
 
 # ============================================================================

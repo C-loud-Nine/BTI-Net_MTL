@@ -86,7 +86,7 @@ def load_sample_tf(
             img = np.zeros((*image_size, 3), dtype=np.float32)
         else:
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            img = cv2.resize(img, image_size).astype(np.float32) / 255.0
+            img = cv2.resize(img, image_size).astype(np.float32) / (255.0 if config.INPUT_SCALE == "unit" else 1.0)
         
         # Parse mask
         msk = cv2.imread(mp, cv2.IMREAD_GRAYSCALE)
@@ -186,9 +186,20 @@ def prepare_ham_datasets() -> Dict[str, Any]:
     vl_mask = np.isin(lesion_ids, vl_lesions)
     te_mask = np.isin(lesion_ids, te_lesions)
 
-    # Sanity integrity validations
-    assert len(set(np.where(tr_mask)[0]) & set(np.where(te_mask)[0])) == 0, "Train/Test lesion overlap!"
-    assert len(set(np.where(vl_mask)[0]) & set(np.where(te_mask)[0])) == 0, "Val/Test lesion overlap!"
+    # Partitions must be disjoint by lesion ID
+    assert set(tr_lesions).isdisjoint(vl_lesions), "Train/Val lesion overlap"
+    assert set(tr_lesions).isdisjoint(te_lesions), "Train/Test lesion overlap"
+    assert set(vl_lesions).isdisjoint(te_lesions), "Val/Test lesion overlap"
+    assert not (tr_mask & te_mask).any() and not (tr_mask & vl_mask).any() and not (vl_mask & te_mask).any()
+    logger.info(f"Lesions -> Train: {len(tr_lesions)} | Val: {len(vl_lesions)} | Test: {len(te_lesions)}")
+
+    # Write the partition manifest (image path, lesion ID, class, split)
+    os.makedirs(config.RESULTS_DIR, exist_ok=True)
+    with open(os.path.join(config.RESULTS_DIR, "ham_split_manifest.csv"), "w") as fh:
+        fh.write("image,lesion_id,class,split\n")
+        for part, m in (("train", tr_mask), ("val", vl_mask), ("test", te_mask)):
+            for i in np.where(m)[0]:
+                fh.write(f"{os.path.basename(img_paths[i])},{lesion_ids[i]},{config.HAM_CATEGORIES[labels[i]]},{part}\n")
 
     def subset_mask(mask):
         idxs = np.where(mask)[0]
@@ -214,5 +225,6 @@ def prepare_ham_datasets() -> Dict[str, Any]:
     return {
         'train_dataset': train_dataset,
         'val_dataset': val_dataset,
-        'test_dataset': test_dataset
+        'test_dataset': test_dataset,
+        'test_paths': [os.path.basename(p) for p in subset_mask(te_mask)[0]],
     }

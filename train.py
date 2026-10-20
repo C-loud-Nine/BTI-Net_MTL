@@ -36,8 +36,25 @@ class CompositeMetric(Callback):
         print(f"\nEpoch {epoch+1}: Combined Metric = {val_combined:.4f}")
 
 
+def selection_iou_metric():
+    """IoU metric used in val_combined; see config.SELECTION_IOU."""
+    if config.SELECTION_IOU == "binary_iou":
+        return tf.keras.metrics.BinaryIoU(target_class_ids=[0, 1], threshold=0.5,
+                                          name="mean_io_u")
+    return tf.keras.metrics.MeanIoU(num_classes=2, name="mean_io_u")
+
+
 class AdaptiveLossWeights(Callback):
-    """Dynamically adjust loss weights during training"""
+    """Stage 1 task-weight schedule as used in the reported runs.
+
+    Epochs 0-14: segmentation +0.007 per epoch up to 0.92, classification
+    -0.007 down to 0.08; from epoch 15: 0.80 / 0.20.
+
+    The weights are assigned to model.loss_weights after compile(). In TensorFlow 2.13
+    (requirements.txt) compile() copies them into model.compiled_loss, and the
+    later assignment does not reach it, so the effective Stage 1 task weights
+    stay at the compile-time values 0.82 / 0.18.
+    """
     def __init__(self):
         super().__init__()
         self.seg_weight = config.SEG_WEIGHT_START
@@ -55,7 +72,9 @@ class AdaptiveLossWeights(Callback):
             "segmentation_output": self.seg_weight,
             "classification_output": self.clf_weight
         }
-        print(f"Loss weights: Seg={self.seg_weight:.3f}, Clf={self.clf_weight:.3f}")
+        print(f"Loss-weight schedule: Seg={self.seg_weight:.3f}, Clf={self.clf_weight:.3f} "
+              f"(not applied: compiled weights stay "
+              f"{config.SEG_WEIGHT_START:.2f}/{config.CLF_WEIGHT_START:.2f} in TF 2.13)")
 
 
 class CosineDecayScheduler(Callback):
@@ -238,7 +257,12 @@ def main():
         required=True,
         help="Dataset to train on: busi, brisc, or ham"
     )
+    parser.add_argument("--seed", type=int, default=config.RANDOM_STATE,
+                        help="training seed; the split seed stays config.RANDOM_STATE")
     args = parser.parse_args()
+    import random
+    random.seed(args.seed); np.random.seed(args.seed); tf.random.set_seed(args.seed)
+    print(f"seed {args.seed} | gate {config.GATE_MODE} | input {config.INPUT_SCALE} | IoU {config.SELECTION_IOU}")
     
     dataset_key = args.dataset
     dataset_cfg = DATASET_REGISTRY[dataset_key]
@@ -276,7 +300,7 @@ def main():
         },
         metrics={
             "segmentation_output": [
-                tf.keras.metrics.MeanIoU(num_classes=2, name="mean_io_u"),
+                selection_iou_metric(),
                 tf.keras.metrics.BinaryAccuracy(name="bin_acc")
             ],
             "classification_output": [
@@ -357,8 +381,15 @@ def main():
         except ValueError:
             print(f"  Warning: Layer '{name}' not found. Skipping SRG unfreezing.")
 
-    if not srg_layers:
-        print("  Error: No SRG gate layers found! Skipping Stage 2.")
+    run_tag = f"{dataset_key}_{config.GATE_MODE}_lg{config.STAGE2_LAMBDA_GATE:g}_s{args.seed}"
+    model_ft_path = None
+    if not srg_layers or not model_ft.trainable_variables:
+        # GATE_MODE "off" and "fixed" have no gate parameters, so there is no
+        # Stage 2 to run; the Stage 1 model is saved and evaluated directly.
+        print("  No trainable SRG parameters (missing layers or GATE_MODE off/fixed). Skipping Stage 2.")
+        model_ft_path = os.path.join(config.CHECKPOINT_DIR, f'stage1_{run_tag}.keras')
+        model.save(model_ft_path)
+        print(f"  Stage 1 model saved to {model_ft_path}")
     else:
         # Verify trainable parameters before compiling
         trainable_count = sum(
@@ -377,7 +408,7 @@ def main():
             },
             metrics={
                 'segmentation_output': [
-                    tf.keras.metrics.MeanIoU(num_classes=2, name='mean_io_u'),
+                    selection_iou_metric(),
                 ],
                 'classification_output': [
                     tf.keras.metrics.SparseCategoricalAccuracy(name='accuracy'),
@@ -403,7 +434,7 @@ def main():
         )
         
         # Save Final Fine-tuned model
-        model_ft_path = os.path.join(config.CHECKPOINT_DIR, f'final_model_ft_{dataset_key}.keras')
+        model_ft_path = os.path.join(config.CHECKPOINT_DIR, f'final_model_ft_{run_tag}.keras')
         model_ft.save(model_ft_path)
         print(f"\n  Final fine-tuned model saved to {model_ft_path}")
     
@@ -423,7 +454,7 @@ def main():
         print(f"  {name}: {value:.4f}")
     
     # Save results
-    results_path = os.path.join(config.RESULTS_DIR, f'test_results_{dataset_key}.txt')
+    results_path = os.path.join(config.RESULTS_DIR, f'test_results_{run_tag}.txt')
     with open(results_path, 'w') as f:
         f.write(f"Dataset: {dataset_cfg['name']}\n")
         f.write(f"Classes: {dataset_cfg['categories']}\n")
@@ -431,6 +462,25 @@ def main():
         for name, value in zip(eval_model.metrics_names, test_results):
             f.write(f"{name}: {value:.6f}\n")
     print(f"  Results saved to {results_path}")
+
+    # Run ledger: one row per run, so every table cell can be traced to a run.
+    import csv, datetime
+    res = dict(zip(eval_model.metrics_names, test_results))
+    ledger = os.path.join(config.RESULTS_DIR, "run_ledger.csv")
+    new = not os.path.exists(ledger)
+    with open(ledger, "a", newline="") as fh:
+        w = csv.writer(fh)
+        if new:
+            w.writerow(["time", "dataset", "training_seed", "split_seed", "gate_mode",
+                        "stage2_lambda_gate", "input_scale", "selection_iou",
+                        "test_accuracy", "checkpoint"])
+        w.writerow([datetime.datetime.now().isoformat(timespec="seconds"), dataset_key,
+                    args.seed, config.RANDOM_STATE, config.GATE_MODE,
+                    config.STAGE2_LAMBDA_GATE, config.INPUT_SCALE, config.SELECTION_IOU,
+                    res.get("classification_output_accuracy", float("nan")),
+                    model_ft_path])
+    print(f"  Run recorded in {ledger}; run evaluate.py on the checkpoint for "
+          f"per-image counts (n_correct / N).")
 
 
 if __name__ == "__main__":

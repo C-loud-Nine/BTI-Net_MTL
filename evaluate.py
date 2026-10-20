@@ -26,14 +26,14 @@ Why each column exists:
   * Macro-F1 and balanced accuracy are reported because weighted recall is
     numerically identical to accuracy and therefore answers nothing about
     minority classes.
-  * Images with an all-zero mask are counted separately. On BRISC this matters:
-    tumour-labelled images with no mask file are substituted with a zero mask
-    upstream (see brisc_dataloader.py), which depresses the overlap metrics.
+  * Images with an all-zero mask are counted separately and excluded from the
+    overlap means. On BRISC these are the non-tumorous images, which have no
+    mask in the segmentation release (see brisc_dataloader.py).
 
 Usage:
-    python evaluate.py --checkpoint checkpoints/busi_stage2.keras --dataset busi
-    python evaluate.py --checkpoint checkpoints/ham_stage2.keras  --dataset ham
-    python evaluate.py --checkpoint checkpoints/brisc_stage2.keras --dataset brisc
+    python evaluate.py --checkpoint checkpoints/final_model_ft_busi_srg_lg1_s42.keras  --dataset busi
+    python evaluate.py --checkpoint checkpoints/final_model_ft_ham_srg_lg1_s42.keras   --dataset ham
+    python evaluate.py --checkpoint checkpoints/final_model_ft_brisc_srg_lg1_s42.keras --dataset brisc
 """
 
 import argparse
@@ -66,7 +66,7 @@ DATASET_INFO = {
 
 
 def load_test_batches(dataset, batch_size):
-    """Yield (images, masks, labels) batches for the test split.
+    """Yield (images, masks, labels, files) batches for the test split.
 
     BUSI returns numpy arrays from its loader; HAM10000 and BRISC return
     tf.data pipelines. Both shapes are normalised to numpy batches here so the
@@ -76,26 +76,31 @@ def load_test_batches(dataset, batch_size):
         import busi_dataloader as dl
         d = dl.prepare_datasets()
         X, m, y = d["X_test"], d["mask_test"], np.asarray(d["y_test"]).astype(int)
+        files = d["paths_test"]
         for i in range(0, len(X), batch_size):
-            yield X[i:i + batch_size], m[i:i + batch_size], y[i:i + batch_size]
+            yield X[i:i + batch_size], m[i:i + batch_size], y[i:i + batch_size], files[i:i + batch_size]
         return
 
     if dataset == "ham":
         import ham_dataloader as dl
-        ds = dl.prepare_ham_datasets()["test_dataset"]
+        d = dl.prepare_ham_datasets()
     elif dataset == "brisc":
         import brisc_dataloader as dl
-        ds = dl.prepare_brics_datasets()["test_dataset"]
+        d = dl.prepare_brics_datasets()
     else:
         raise ValueError(dataset)
 
     print("[note] this modality uses a tf.data pipeline, so the evaluation "
           f"batch size is the one it was built with (config.BATCH_SIZE = "
           f"{config.BATCH_SIZE}), not --batch-size.")
+    ds, files, k = d["test_dataset"], d["test_paths"], 0   # unshuffled, same order as files
     for images, targets in ds:
+        b = len(images)
         yield (images.numpy(),
                targets["segmentation_output"].numpy(),
-               targets["classification_output"].numpy().astype(int).reshape(-1))
+               targets["classification_output"].numpy().astype(int).reshape(-1),
+               files[k:k + b])
+        k += b
 
 
 def build_gate_export_model(model):
@@ -115,8 +120,15 @@ def build_gate_export_model(model):
         except ValueError:
             print(f"[warn] gate layer '{nm}' not found; gates not exported")
             return model, []
-        ins = layer.input
-        if not isinstance(ins, (list, tuple)) or len(ins) != 4:
+        # layer.input returns only the first positional argument of a
+        # multi-input call, so read the call arguments from the inbound node;
+        # after loading a saved model trailing arguments may be keywords.
+        node = layer._inbound_nodes[0]
+        ins = list(node.call_args)
+        for key in ("seg_base", "seg_enhanced", "clf_base", "clf_enhanced"):
+            if key in (node.call_kwargs or {}):
+                ins.append(node.call_kwargs[key])
+        if len(ins) != 4:
             print(f"[warn] unexpected inputs on '{nm}'; gates not exported")
             return model, []
         outs.append(layer.compute_gates(*ins))
@@ -150,7 +162,9 @@ def main():
     ap.add_argument("--batch-size", type=int, default=config.VAL_BATCH_SIZE,
                     help="BUSI only; HAM and BRISC use the tf.data batch size.")
     args = ap.parse_args()
-    tag = args.tag or f"{args.dataset}_bs{args.batch_size}"
+    # default tag follows the checkpoint, so runs and seeds do not overwrite each other
+    bs = args.batch_size if args.dataset == "busi" else config.BATCH_SIZE
+    tag = args.tag or f"{os.path.splitext(os.path.basename(args.checkpoint))[0]}_bs{bs}"
     cls, n_cls = DATASET_INFO[args.dataset]
 
     print(f"[load] {args.checkpoint}")
@@ -158,11 +172,12 @@ def main():
         args.checkpoint, compile=False, custom_objects=CUSTOM_OBJECTS)
     export, gate_names = build_gate_export_model(model)
 
-    rows_y, rows_pred, rows_prob = [], [], []
+    rows_y, rows_pred, rows_prob, rows_file = [], [], [], []
     acc_tp, acc_fp, acc_fn, acc_iou, acc_dice, acc_fg = [], [], [], [], [], []
     acc_gates = [[] for _ in gate_names]
 
-    for images, masks, labels in load_test_batches(args.dataset, args.batch_size):
+    for images, masks, labels, files in load_test_batches(args.dataset, args.batch_size):
+        rows_file.extend(files)
         out = export.predict_on_batch(images)
         seg = np.asarray(out[0])
         if seg.ndim == 4:
@@ -189,7 +204,7 @@ def main():
 
     n = len(y_true)
     # Hard guarantee against the last-batch truncation this script exists to fix.
-    assert len(clf_pred) == n and len(iou) == n, "metric length != N"
+    assert len(clf_pred) == n and len(iou) == n and len(rows_file) == n, "metric length != N"
     for nm, g in zip(gate_names, gates):
         assert len(g) == n, f"gate '{nm}' has {len(g)} rows, expected {n}"
     print(f"[data] {args.dataset}: test images N = {n}  "
@@ -203,12 +218,12 @@ def main():
     path = os.path.join(config.RESULTS_DIR, f"predictions_{tag}.csv")
     gcols = [f"{nm}_w_{k}" for nm in gate_names for k in ("seg", "clf")]
     with open(path, "w") as f:
-        f.write("index,true_class,pred_class,correct,max_prob," +
+        f.write("index,file,true_class,pred_class,correct,max_prob," +
                 ",".join(f"p_{c}" for c in cls) +
                 ",tp,fp,fn,iou,dice,has_foreground" +
                 ("," + ",".join(gcols) if gcols else "") + "\n")
         for i in range(n):
-            row = [str(i), cls[y_true[i]], cls[clf_pred[i]], str(int(correct[i])),
+            row = [str(i), str(rows_file[i]), cls[y_true[i]], cls[clf_pred[i]], str(int(correct[i])),
                    f"{clf_prob[i].max():.6f}"]
             row += [f"{v:.6f}" for v in clf_prob[i]]
             row += [f"{tp[i]:.0f}", f"{fp[i]:.0f}", f"{fn[i]:.0f}",
