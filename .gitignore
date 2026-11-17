@@ -1,12 +1,6 @@
 __pycache__/
-*.py[cod]
-.ipynb_checkpoints/
-
-# data, weights and outputs are not tracked
+*.pyc
+.cache/
 data/
-checkpoints/
 results/
-logs/
-*.h5
-*.keras
-*.ckpt*
+splits/brisc_partitions.csv
